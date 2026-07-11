@@ -318,7 +318,9 @@ export const keyframeDataSchema = z.object({
   values: z
     .union([vector3Schema, z.number()])
     .optional()
-    .describe("Values: [x,y,z] for position/rotation, number for uniform scale."),
+    .describe(
+      "Blockbench-native values: [x,y,z] for position/rotation, number for uniform scale."
+    ),
   interpolation: interpolationEnum
     .optional()
     .default("linear")

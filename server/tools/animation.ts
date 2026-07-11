@@ -32,9 +32,16 @@ export const createAnimationParameters = z.object({
       z.array(
         z.object({
           time: z.number(),
-          position: vector3Schema.optional(),
-          rotation: vector3Schema.optional(),
-          scale: z.union([vector3Schema, z.number()]).optional(),
+          position: vector3Schema
+            .optional()
+            .describe("Blockbench-native position [x, y, z]."),
+          rotation: vector3Schema
+            .optional()
+            .describe("Blockbench-native Euler rotation [x, y, z] in degrees."),
+          scale: z
+            .union([vector3Schema, z.number()])
+            .optional()
+            .describe("Blockbench-native scale [x, y, z] or a uniform value."),
         })
       )
     )
@@ -249,7 +256,8 @@ export const animationCopyPasteParameters = z.object({
 export const animationToolDocs: ToolSpec[] = [
   {
     name: "create_animation",
-    description: "Creates a new animation with keyframes for bones.",
+    description:
+      "Creates a new animation with bone keyframes using Blockbench-native transform coordinates.",
     annotations: {
       title: "Create Animation",
       destructiveHint: true,
@@ -260,7 +268,7 @@ export const animationToolDocs: ToolSpec[] = [
   {
     name: "manage_keyframes",
     description:
-      "Creates, deletes, or edits keyframes in the animation timeline for specific bones and channels.",
+      "Creates, deletes, or edits keyframes using Blockbench-native transform coordinates.",
     annotations: {
       title: "Manage Keyframes",
       destructiveHint: true,
@@ -324,48 +332,71 @@ export const animationToolDocs: ToolSpec[] = [
   },
 ];
 
+function getKeyframeValueData(values: number[] | number) {
+  if (typeof values === "number") {
+    return { x: values, y: values, z: values, uniform: true };
+  }
+  return { x: values[0], y: values[1], z: values[2], uniform: false };
+}
+
 export function registerAnimationTools() {
 createTool(
   animationToolDocs[0].name,
   {
     ...animationToolDocs[0],
     async execute({ name, loop, animation_length, bones, particle_effects }) {
-      const animationData = {
-        loop,
-        ...(animation_length && { animation_length }),
-        bones: Object.fromEntries(
-          Object.entries(bones).map(([boneName, keyframes]) => {
-            const boneData: Record<
-              string,
-              Record<string, number | number[]>
-            > = keyframes.reduce((acc, keyframe) => {
-              const timeKey = keyframe.time.toString();
-              if (keyframe.position) {
-                (acc.position ??= {})[timeKey] = keyframe.position;
-              }
-              if (keyframe.rotation) {
-                (acc.rotation ??= {})[timeKey] = keyframe.rotation;
-              }
-              if (keyframe.scale) {
-                (acc.scale ??= {})[timeKey] = keyframe.scale;
-              }
-              return acc;
-            }, {} as Record<string, Record<string, number | number[]>>);
+      const groups = Object.fromEntries(
+        Object.keys(bones).map((boneName) => [boneName, findGroupOrThrow(boneName)])
+      );
 
-            return [boneName, boneData];
-          })
-        ),
-        ...(particle_effects && { particle_effects }),
-      };
+      Undo.initEdit({ animations: [] });
 
-      Animator.loadFile({
-        content: JSON.stringify({
-          format_version: "1.8.0",
-          animations: {
-            [`animation.${name}`]: animationData,
-          },
-        }),
+      const animation = new Animation({
+        name: `animation.${name}`,
+        loop: loop ? "loop" : "once",
+        length: animation_length ?? 0,
+      }).add(false);
+      const selectAnimation = !Animation.selected && Animator.open;
+
+      Object.entries(bones).forEach(([boneName, keyframes]) => {
+        const group = groups[boneName];
+        const animator = new BoneAnimator(group.uuid, animation, boneName);
+        animation.animators[group.uuid] = animator;
+
+        keyframes.forEach((keyframe) => {
+          (["position", "rotation", "scale"] as const).forEach((channel) => {
+            const values = keyframe[channel];
+            if (values === undefined) return;
+            animator.addKeyframe({
+              ...getKeyframeValueData(values),
+              time: keyframe.time,
+              channel,
+              interpolation: "linear",
+            });
+          });
+        });
       });
+
+      if (particle_effects) {
+        const effectAnimator = new EffectAnimator(animation);
+        animation.animators.effects = effectAnimator;
+        Object.entries(particle_effects).forEach(([time, effect]) => {
+          effectAnimator.addKeyframe({
+            channel: "particle",
+            time: Number(time),
+            data_points: [{ effect }],
+          });
+        });
+      }
+
+      if (animation_length === undefined) {
+        animation.setLength(animation.getMaxLength());
+      }
+      animation.calculateSnappingFromKeyframes();
+      animation.setScopeFromAnimators();
+      if (selectAnimation) animation.select();
+      Undo.finishEdit("Create animation", { animations: [animation] });
+      Animator.preview();
 
       return `Created animation "${name}" with keyframes for ${
         Object.keys(bones).length
@@ -417,7 +448,9 @@ createTool(
               {
                 time: kf.time,
                 channel,
-                values: kf.values,
+                ...(kf.values === undefined
+                  ? {}
+                  : getKeyframeValueData(kf.values)),
                 interpolation: kf.interpolation,
               },
               kf.time,
@@ -459,8 +492,8 @@ createTool(
               (k) => Math.abs(k.time - kf.time) < 0.001
             );
             if (keyframe) {
-              if (kf.values) {
-                keyframe.set("values", kf.values);
+              if (kf.values !== undefined) {
+                keyframe.extend(getKeyframeValueData(kf.values));
               }
               if (kf.interpolation) {
                 keyframe.interpolation = kf.interpolation;
@@ -909,11 +942,13 @@ createTool(
             }
             if (parameters.offset_values) {
               const values = kf.getArray();
-              kf.set("values", [
-                values[0] + parameters.offset_values[0],
-                values[1] + parameters.offset_values[1],
-                values[2] + parameters.offset_values[2],
-              ]);
+              kf.extend(
+                getKeyframeValueData([
+                  values[0] + parameters.offset_values[0],
+                  values[1] + parameters.offset_values[1],
+                  values[2] + parameters.offset_values[2],
+                ])
+              );
             }
           });
           break;
@@ -948,7 +983,7 @@ createTool(
           keyframes.forEach((kf) => {
             const values = kf.getArray();
             values[axisIndex] *= -1;
-            kf.set("values", values);
+            kf.extend(getKeyframeValueData(values));
           });
           break;
 
@@ -983,7 +1018,6 @@ createTool(
                       {
                         time,
                         channel,
-                        values: animator.interpolate(channel, true),
                       },
                       time,
                       channel,
@@ -1154,7 +1188,7 @@ createTool(
                   {
                     time: kfData.time + (target.time_offset || 0),
                     channel,
-                    values,
+                    ...getKeyframeValueData(values),
                     interpolation: kfData.interpolation,
                   },
                   kfData.time + (target.time_offset || 0),

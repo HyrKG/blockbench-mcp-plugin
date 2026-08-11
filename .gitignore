@@ -1,4 +1,29 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Build output
 dist/
+
+# Generated docs (run `bun run docs` to regenerate)
+docs/
+
+# Environment & secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
 .claude
+.vscode/
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
 nul
